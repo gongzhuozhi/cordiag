@@ -1,7 +1,7 @@
 """cordiag.zpg - z-score of Paired Gain (zPG) core module.
 
-zPG metric: under condition x batch stratification, measures individual-level
-RNA-to-protein predictive gain beyond stratum labels (cross-omics bridgeability).
+Measures individual-level RNA-to-protein predictive gain beyond stratum labels
+(cross-omics bridgeability), with within-stratum restricted permutation null.
 
 Single source of truth: code/simulation/metrics_v3.py (BridgeOmics v3).
 Decision logic: GO / INCONCLUSIVE / NO_GO three-tier framework.
@@ -33,102 +33,96 @@ def _coerce_design(design, n, require_batch=True):
         needed = ['condition','batch'] if require_batch else ['condition']
         missing = [c for c in needed if c not in design.columns]
         if missing: raise ValueError(f"design missing: {missing}")
-        if len(design) != n: raise ValueError(f"rows {len(design)} vs samples {n}")
+        if len(design) != n: raise ValueError(f"rows {len(design)} vs {n}")
         return design
     if isinstance(design, (tuple,list)):
-        if len(design) != 2: raise ValueError("design tuple must be (condition, batch)")
-        cond = np.asarray(design[0]); batch = np.asarray(design[1])
-        if len(cond) != n or len(batch) != n: raise ValueError(f"length mismatch")
-        return pd.DataFrame({'condition':cond, 'batch':batch})
-    raise TypeError("design must be DataFrame or (condition,batch) tuple")
+        if len(design) != 2: raise ValueError("need (condition,batch)")
+        cond=np.asarray(design[0]); batch=np.asarray(design[1])
+        if len(cond)!=n or len(batch)!=n: raise ValueError("length mismatch")
+        return pd.DataFrame({'condition':cond,'batch':batch})
+    raise TypeError("design must be DataFrame or tuple")
 
-def _loo_stratum_ridge(X, y, strata, mice=None):
-    n = len(y) if mice is None else len(mice)
-    preds, _mse, _edf, _alpha = _m1_loocv(
-        P=np.asarray(y[:n],dtype=np.float64), X=np.asarray(X[:n],dtype=np.float64),
-        strata=np.asarray(strata[:n]), cv_alphas=_CV_ALPHAS, fixed_alpha=None,
-        groups=None, unseen_stratum='skip')
-    truths = np.asarray(y[:n],dtype=np.float64).copy()
-    return preds, truths
+def _loo_stratum_ridge(X,y,strata,mice=None):
+    n=len(y) if mice is None else len(mice)
+    preds,_,_,_=_m1_loocv(P=np.asarray(y[:n],dtype=np.float64),
+        X=np.asarray(X[:n],dtype=np.float64), strata=np.asarray(strata[:n]),
+        cv_alphas=_CV_ALPHAS,fixed_alpha=None,groups=None,unseen_stratum='skip')
+    truths=np.asarray(y[:n],dtype=np.float64).copy(); return preds,truths
 
-def _loo_fast(X, y, strata, mice):
-    n = len(mice); preds = np.full(n, np.nan); truths = np.zeros(n)
+def _loo_fast(X,y,strata,mice):
+    n=len(mice); preds=np.full(n,np.nan); truths=np.zeros(n)
     for i in range(n):
-        tr = [j for j in range(n) if j != i]
-        if len(tr) < 3: truths[i]=y[i]; continue
-        strata_tr = strata.iloc[tr]; y_ctr, X_ctr = y[tr].copy(), X[tr].copy()
+        tr=[j for j in range(n) if j!=i]
+        if len(tr)<3: truths[i]=y[i]; continue
+        strata_tr=strata.iloc[tr]; y_ctr=y[tr].copy(); X_ctr=X[tr].copy()
         for s in strata_tr.unique():
-            idx = np.where(strata_tr == s)[0]
-            if len(idx) > 0:
-                y_ctr[idx] -= np.mean(y[tr][idx]); X_ctr[idx] -= np.mean(X[tr][idx], axis=0)
-        s_test = strata.iloc[i]; s_tr_idx = np.where(strata_tr == s_test)[0]
-        if len(s_tr_idx) == 0: truths[i]=y[i]; continue
-        y_test_ctr = y[i] - np.mean(y[tr][s_tr_idx])
-        X_test_ctr = X[i] - np.mean(X[tr][s_tr_idx], axis=0)
+            idx=np.where(strata_tr==s)[0]
+            if len(idx)>0: y_ctr[idx]-=np.mean(y[tr][idx]); X_ctr[idx]-=np.mean(X[tr][idx],axis=0)
+        s_test=strata.iloc[i]; s_tr_idx=np.where(strata_tr==s_test)[0]
+        if len(s_tr_idx)==0: truths[i]=y[i]; continue
+        y_test_ctr=y[i]-np.mean(y[tr][s_tr_idx]); X_test_ctr=X[i]-np.mean(X[tr][s_tr_idx],axis=0)
         try:
-            sX = StandardScaler().fit(X_ctr); sy = StandardScaler().fit(y_ctr.reshape(-1,1))
-            m = Ridge(alpha=1.0).fit(sX.transform(X_ctr), sy.transform(y_ctr.reshape(-1,1)).ravel())
-            preds[i] = sy.inverse_transform(m.predict(sX.transform(X_test_ctr.reshape(1,-1))).reshape(-1,1)).ravel()[0]
-            preds[i] += np.mean(y[tr][s_tr_idx]); truths[i] = y[i]
-        except Exception: truths[i] = y[i]
-    return preds, truths
+            sX=StandardScaler().fit(X_ctr); sy=StandardScaler().fit(y_ctr.reshape(-1,1))
+            m=Ridge(alpha=1.0).fit(sX.transform(X_ctr),sy.transform(y_ctr.reshape(-1,1)).ravel())
+            preds[i]=sy.inverse_transform(m.predict(sX.transform(X_test_ctr.reshape(1,-1))).reshape(-1,1)).ravel()[0]
+            preds[i]+=np.mean(y[tr][s_tr_idx]); truths[i]=y[i]
+        except Exception: truths[i]=y[i]
+    return preds,truths
 
-def _kfold_stratum_ridge(X, y, strata, n_folds=5, seed=42):
-    rng = np.random.default_rng(seed); n = len(y)
-    preds = np.full(n, np.nan); truths = np.zeros(n)
-    indices = np.arange(n); rng.shuffle(indices)
-    fold_assignments = np.zeros(n, dtype=int); fold_size = n // n_folds
+def _kfold_stratum_ridge(X,y,strata,n_folds=5,seed=42):
+    rng=np.random.default_rng(seed); n=len(y); preds=np.full(n,np.nan); truths=np.zeros(n)
+    indices=np.arange(n); rng.shuffle(indices); fold_assignments=np.zeros(n,dtype=int)
+    fold_size=n//n_folds
     for f in range(n_folds):
-        start = f * fold_size; end = start + fold_size if f < n_folds - 1 else n
-        fold_assignments[indices[start:end]] = f
+        start=f*fold_size; end=start+fold_size if f<n_folds-1 else n
+        fold_assignments[indices[start:end]]=f
     for f in range(n_folds):
-        test_idx = np.where(fold_assignments == f)[0]; train_idx = np.where(fold_assignments != f)[0]
+        test_idx=np.where(fold_assignments==f)[0]; train_idx=np.where(fold_assignments!=f)[0]
         for i in test_idx:
-            tr = [j for j in train_idx]
-            if len(tr) < 3: truths[i]=y[i]; continue
-            strata_tr = strata.iloc[tr]; y_ctr, X_ctr = y[tr].copy(), X[tr].copy()
+            tr=[j for j in train_idx]
+            if len(tr)<3: truths[i]=y[i]; continue
+            strata_tr=strata.iloc[tr]; y_ctr=y[tr].copy(); X_ctr=X[tr].copy()
             for s in strata_tr.unique():
-                idx = np.where(strata_tr == s)[0]
+                idx=np.where(strata_tr==s)[0]
                 if len(idx)>0: y_ctr[idx]-=np.mean(y[tr][idx]); X_ctr[idx]-=np.mean(X[tr][idx],axis=0)
-            s_test = strata.iloc[i]; s_tr_idx = np.where(strata_tr == s_test)[0]
+            s_test=strata.iloc[i]; s_tr_idx=np.where(strata_tr==s_test)[0]
             if len(s_tr_idx)==0: truths[i]=y[i]; continue
-            y_test_ctr = y[i]-np.mean(y[tr][s_tr_idx]); X_test_ctr = X[i]-np.mean(X[tr][s_tr_idx],axis=0)
+            y_test_ctr=y[i]-np.mean(y[tr][s_tr_idx]); X_test_ctr=X[i]-np.mean(X[tr][s_tr_idx],axis=0)
             try:
-                sX = StandardScaler().fit(X_ctr); sy = StandardScaler().fit(y_ctr.reshape(-1,1))
-                m = Ridge(alpha=1.0).fit(sX.transform(X_ctr), sy.transform(y_ctr.reshape(-1,1)).ravel())
-                preds[i] = sy.inverse_transform(m.predict(sX.transform(X_test_ctr.reshape(1,-1))).reshape(-1,1)).ravel()[0]
-                preds[i] += np.mean(y[tr][s_tr_idx]); truths[i]=y[i]
+                sX=StandardScaler().fit(X_ctr); sy=StandardScaler().fit(y_ctr.reshape(-1,1))
+                m=Ridge(alpha=1.0).fit(sX.transform(X_ctr),sy.transform(y_ctr.reshape(-1,1)).ravel())
+                preds[i]=sy.inverse_transform(m.predict(sX.transform(X_test_ctr.reshape(1,-1))).reshape(-1,1)).ravel()[0]
+                preds[i]+=np.mean(y[tr][s_tr_idx]); truths[i]=y[i]
             except Exception: truths[i]=y[i]
-    return preds, truths
+    return preds,truths
 
-def compute_rank_zPG(R_modules, P, design, n_perms, seed=None):
-    design = _coerce_design(design, len(P))
-    rng = np.random.default_rng(seed) if seed is not None else _RNG
-    n = len(P); strata = design['condition']+'_'+design['batch']
-    unique_strata = strata.unique()
-    X_modules = np.column_stack([R_modules[m] for m in sorted(R_modules.keys())])
-    true_preds, true_truths = _loo_stratum_ridge(X_modules, P, strata, np.arange(n))
-    valid = ~np.isnan(true_preds)
-    stratum_preds = np.array([
+def compute_rank_zPG(R_modules,P,design,n_perms,seed=None):
+    design=_coerce_design(design,len(P))
+    rng=np.random.default_rng(seed) if seed is not None else _RNG
+    n=len(P); strata=design['condition']+'_'+design['batch']; unique_strata=strata.unique()
+    X_modules=np.column_stack([R_modules[m] for m in sorted(R_modules.keys())])
+    true_preds,true_truths=_loo_stratum_ridge(X_modules,P,strata,np.arange(n))
+    valid=~np.isnan(true_preds)
+    stratum_preds=np.array([
         np.mean(P[[j for j in range(n) if j!=i and strata.iloc[j]==strata.iloc[i]]])
         if np.any([j!=i and strata.iloc[j]==strata.iloc[i] for j in range(n)])
         else np.mean(P[[j for j in range(n) if j!=i]]) for i in range(n)])
-    mse_model = np.mean((true_preds[valid]-true_truths[valid])**2)
-    mse_stratum = np.mean((stratum_preds[valid]-true_truths[valid])**2)
-    Q2_obs = np.nan if mse_stratum<1e-10 else 1-mse_model/mse_stratum
+    mse_model=np.mean((true_preds[valid]-true_truths[valid])**2)
+    mse_stratum=np.mean((stratum_preds[valid]-true_truths[valid])**2)
+    Q2_obs=np.nan if mse_stratum<1e-10 else 1-mse_model/mse_stratum
     if valid.sum()<3: rho_obs=np.nan
-    else: rho_obs,_ = spearmanr(true_preds[valid], true_truths[valid])
-    perm_rhos, perm_Q2s = [], []
+    else: rho_obs,_=spearmanr(true_preds[valid],true_truths[valid])
+    perm_rhos,perm_Q2s=[],[]
     for _ in range(n_perms):
-        P_perm = P.copy()
+        P_perm=P.copy()
         for s in unique_strata:
-            s_idx = np.where(strata==s)[0]
+            s_idx=np.where(strata==s)[0]
             if len(s_idx)>=2: P_perm[s_idx]=P[s_idx[rng.permutation(len(s_idx))]]
-        preds, truths = _loo_stratum_ridge(X_modules, P_perm, strata, np.arange(n))
-        v = ~np.isnan(preds)
+        preds,truths=_loo_stratum_ridge(X_modules,P_perm,strata,np.arange(n))
+        v=~np.isnan(preds)
         if v.sum()>=3:
             perm_rhos.append(spearmanr(preds[v],truths[v])[0])
-            mse_p = np.mean((preds[v]-truths[v])**2)
+            mse_p=np.mean((preds[v]-truths[v])**2)
             perm_Q2s.append(np.nan if mse_stratum<1e-10 else 1-mse_p/mse_stratum)
     perm_rhos=np.array(perm_rhos); perm_Q2s=np.array(perm_Q2s)
     perm_std=np.std(perm_rhos)
@@ -140,17 +134,16 @@ def compute_rank_zPG(R_modules, P, design, n_perms, seed=None):
     min_p=1.0
     for s in unique_strata:
         n_s=(strata==s).sum()
-        if n_s>=2: min_p=min(min_p, 1.0/(math.factorial(n_s) if n_s<=10 else 1000))
-    min_p=max(min_p, 1.0/(n_perms+1))
+        if n_s>=2: min_p=min(min_p,1.0/(math.factorial(n_s) if n_s<=10 else 1000))
+    min_p=max(min_p,1.0/(n_perms+1))
     return {'zPG_rank':zPG_rank,'zPG_Q2':zPG_Q2,'rho_obs':rho_obs,'Q2_obs':Q2_obs,
             'p_val':p_val,'perm_rho_mean':np.mean(perm_rhos),'perm_rho_std':np.std(perm_rhos),
             'min_achievable_p':min_p,'n_valid':valid.sum()}
 
-def compute_rank_zPG_partial(R_modules, P, design, n_perms, seed=None, n_pcs=3):
+def compute_rank_zPG_partial(R_modules,P,design,n_perms,seed=None,n_pcs=3):
     design=_coerce_design(design,len(P))
     rng=np.random.default_rng(seed) if seed is not None else _RNG
-    n=len(P); strata=design['condition']+'_'+design['batch']
-    unique_strata=strata.unique()
+    n=len(P); strata=design['condition']+'_'+design['batch']; unique_strata=strata.unique()
     X=np.column_stack([R_modules[m] for m in sorted(R_modules.keys())])
     X_scaled=StandardScaler().fit_transform(X)
     pca=PCA(n_components=min(n_pcs,X.shape[1],n-1)); X_pca=pca.fit_transform(X_scaled)
@@ -167,8 +160,8 @@ def compute_rank_zPG_partial(R_modules, P, design, n_perms, seed=None, n_pcs=3):
         for s in unique_strata:
             s_idx=np.where(strata==s)[0]
             if len(s_idx)>=2: P_perm[s_idx]=P[s_idx[rng.permutation(len(s_idx))]]
-        beta_yp=np.linalg.lstsq(cond_dummies,P_perm,rcond=None)[0]
-        Pp_resid=P_perm-cond_dummies@beta_yp; rho_p,_=spearmanr(rna_combined,Pp_resid)
+        beta_yp=np.linalg.lstsq(cond_dummies,P_perm,rcond=None)[0]; Pp_resid=P_perm-cond_dummies@beta_yp
+        rho_p,_=spearmanr(rna_combined,Pp_resid)
         if not np.isnan(rho_p): perm_rhos.append(rho_p)
     perm_rhos=np.array(perm_rhos); perm_std=np.std(perm_rhos)
     zPG_partial=np.nan if perm_std<1e-10 else (rho_obs-np.mean(perm_rhos))/perm_std
@@ -183,7 +176,7 @@ def compute_rank_zPG_partial(R_modules, P, design, n_perms, seed=None, n_pcs=3):
             'perm_rho_mean':np.mean(perm_rhos),'perm_rho_std':np.std(perm_rhos),
             'min_achievable_p':min_p,'n_pcs':n_pcs,'pca_variance_explained':pca.explained_variance_ratio_.sum()}
 
-def _zpg_with_cv(R_modules,P,design,n_folds,n_perms,seed=42,actual_perms=None):
+def _zpg_with_cv(R_modules,P,design,n_folds,n_perms,seed=42):
     design=_coerce_design(design,len(P)); rng=np.random.default_rng(seed)
     n=len(P); strata=design['condition'].astype(str)+'_'+design['batch'].astype(str)
     unique_strata=strata.unique()
@@ -270,8 +263,7 @@ def decide_legacy(zpg,p_fdr,zpg_go=1.0,fdr_go=0.1):
 def compute_ECI(R_modules,design,cond_pairs,n_bootstrap=200,seed=None):
     n=len(next(iter(R_modules.values()))) if R_modules else 0
     design=_coerce_design(design,n,require_batch=False)
-    rng=np.random.default_rng(seed) if seed is not None else _RNG
-    results={}
+    rng=np.random.default_rng(seed) if seed is not None else _RNG; results={}
     for ca,cb in cond_pairs:
         idx_a=design['condition']==ca; idx_b=design['condition']==cb
         if idx_a.sum()<2 or idx_b.sum()<2: results[f'{ca}_vs_{cb}']={'ECI':np.nan,'ECI_ci':(np.nan,np.nan)}; continue
@@ -298,10 +290,10 @@ def _interpret_ECI(eci):
     else: return "Severely inconsistent"
 
 def joint_decision(zPG,ECI,zPG_thresh=0,ECI_thresh=0.5):
-    if zPG>zPG_thresh and ECI<ECI_thresh: return "GO: signal + direction stable"
-    elif zPG>zPG_thresh and ECI>=ECI_thresh: return "CAUTION: signal but direction unstable"
+    if zPG>zPG_thresh and ECI<ECI_thresh: return "GO: signal+direction stable"
+    elif zPG>zPG_thresh and ECI>=ECI_thresh: return "CAUTION: signal, direction unstable"
     elif zPG<=zPG_thresh and ECI>=ECI_thresh: return "STOP: batch-dominated"
-    else: return "NO_SIGNAL: weak individual coupling"
+    else: return "NO_SIGNAL: weak coupling"
 
 def compute_module_q2_simple(R_modules,P,design):
     n=len(P)
