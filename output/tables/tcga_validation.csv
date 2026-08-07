@@ -1,0 +1,9 @@
+module,comparison,n,zPG,rho_obs,p_val,p_fdr,GO,significant_fdr,decision,n_genes
+M0,stageI_vs_III,53,-11.772,0.650,1.0,1.0,False,False,NO_GO,18
+M1,stageI_vs_III,53,-0.858,0.319,0.783,0.891,False,False,NO_GO,18
+M2,stageI_vs_III,53,0.125,0.427,0.443,0.669,False,False,GRAY,18
+M3,stageI_vs_III,53,-0.045,0.350,0.537,0.669,False,False,NO_GO,18
+M4,stageI_vs_III,53,2.987,0.715,0.006,0.008,True,True,GO,18
+M5,stageI_vs_III,53,-0.005,0.145,0.514,0.669,False,False,NO_GO,18
+M6,stageI_vs_III,53,0.730,0.336,0.231,0.462,False,False,GRAY,18
+M7,stageI_vs_III,53,3.027,0.801,0.004,0.008,True,True,GO,18

@@ -1,0 +1,13 @@
+scenario,scenario_group,n_total,type_i_p95,n_reps
+NULL_IDENTICAL,null_identical,164,0.05,100
+NULL_IDENTICAL,null_identical,190,0.05,100
+NULL_IDENTICAL,null_identical,210,0.05,100
+NULL_IDENTICAL,null_identical,242,0.05,100
+NULL_STRATUM_SHIFT,null_stratum_shift,164,0.05,100
+NULL_STRATUM_SHIFT,null_stratum_shift,190,0.05,100
+NULL_STRATUM_SHIFT,null_stratum_shift,210,0.05,100
+NULL_STRATUM_SHIFT,null_stratum_shift,242,0.05,100
+TRANSPORTABLE,transportable,164,0.05,100
+TRANSPORTABLE,transportable,190,0.05,100
+TRANSPORTABLE,transportable,210,0.05,100
+TRANSPORTABLE,transportable,242,0.05,100
